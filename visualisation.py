@@ -5,6 +5,7 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 from datetime import datetime
 from pathlib import Path
+from io import StringIO
 
 
 def plot_heatmap_plotly(
@@ -45,23 +46,64 @@ def main():
 
     all_data = []
 
-    for file_path in files:
-        uid, date = file_path.stem.split('_')
+    for i, file_path in enumerate(files):
+        split = file_path.stem.split('_')
+        uid = split[0]
         columns = ["timestamp", "x", "y", "z", "activity"]
 
         # Read data
-        data = pd.read_csv(file_path, names=columns)
-        data["datetime"] = data["timestamp"].astype(str).apply(lambda x: datetime.strptime(x, "%y%m%d%H%M%S"))
+        try:
+            data = pd.read_csv(file_path, names=columns)
+        except Exception as e:
+            with open(file_path, 'rb') as f:
+                contents = f.read()
+                decoded_data = contents.decode("ISO-8859-1")
+                data_io = StringIO(decoded_data)
+                data = pd.read_csv(data_io, header=None, on_bad_lines="skip")
+                data.columns = columns[0: len(decoded_data.split('\n')[0].split(','))]
+                data["timestamp"] = data["timestamp"].astype(str).str.split('.').str[0]
+                fixed_path = f"{file_path.parent / file_path.stem}_fixed.csv"
+                print(fixed_path)
+                data.to_csv(fixed_path, index=False, header=False)
+                #file_path.unlink()
 
+        # Remove non-numeric timestamps
+        data["timestamp"] = pd.to_numeric(data["timestamp"], errors="coerce")
+
+        # Drop rows with NaN timestamps (corrupted rows)
+        data = data.dropna(subset=["timestamp"])
+
+        dates = []
+        for x in data["timestamp"].astype(str).str.split('.').str[0]:
+            if len(x) > 12:
+                d = pd.NA
+                dates.append(d)
+                continue
+            d = datetime.strptime(x, "%y%m%d%H%M%S")
+            dates.append(d)
+        data["datetime"] = dates
+        data = data.dropna()
+        #data["datetime"] = data["timestamp"].astype(str).str.split('.').str[0].apply(lambda x: datetime.strptime(x, "%y%m%d%H%M%S"))
         # Filter data after the specified date
         data = data[data["datetime"] >= start_date]
 
-        data = data.set_index("datetime")
-        data_resampled = data.resample("1T").sum().reset_index() # 1T code resamples to 1min
+        data = data.sort_values(by="datetime")
+
+        # data = data.set_index("datetime")
+        # data_resampled = data.resample("1T").agg({
+        #     "timestamp": "first",  # Keep first timestamp
+        #     "x": "sum",  # Sum x values
+        #     "y": "sum",  # Sum y values
+        #     "z": "sum",  # Sum z values
+        #     "activity": "sum"  # Sum activity
+        # }).reset_index()
+        data_resampled = data.dropna()
 
         # Store UID in the data
         data_resampled["uid"] = uid
-        all_data.append(data_resampled)
+
+        if len(data_resampled) > 0:
+            all_data.append(data_resampled)
 
     # Combine all filtered data
     if all_data:
@@ -69,9 +111,14 @@ def main():
 
         # Sort data by datetime
         df = df.sort_values(by="datetime").reset_index(drop=True)
-
         # Create pivot table for heatmap
-        heatmap_data = df.pivot(index="uid", columns="datetime", values="activity")
+        heatmap_data = df.pivot_table(index="uid", columns="datetime", values="activity",  aggfunc='first')
+
+        print("saving dataset...")
+        heatmap_data.to_csv("dataset.csv", index=True)
+
+        #heatmap_data = heatmap_data.fillna(0)
+        heatmap_data = np.squeeze(heatmap_data)
 
         # Extract required arrays
         X = np.sqrt(heatmap_data.values)  # Activity values (Z)
